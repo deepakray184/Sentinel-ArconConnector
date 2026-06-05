@@ -1,0 +1,322 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for all resources"
+      }
+    },
+    "logicAppName": {
+      "type": "string",
+      "defaultValue": "ArconToSentinel-Connector",
+      "metadata": {
+        "description": "Name of the Logic App"
+      }
+    },
+    "arconApiUrl": {
+      "type": "string",
+      "metadata": {
+        "description": "Arcon API base URL (e.g., https://api.arcon.example.com/v1)"
+      }
+    },
+    "arconApiKey": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Arcon API Key for authentication"
+      }
+    },
+    "workspaceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics Workspace ID"
+      }
+    },
+    "workspaceKey": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Log Analytics Workspace Primary Key"
+      }
+    },
+    "logTableName": {
+      "type": "string",
+      "defaultValue": "ArconLogs_CL",
+      "metadata": {
+        "description": "Custom log table name in Log Analytics"
+      }
+    },
+    "pullIntervalMinutes": {
+      "type": "int",
+      "defaultValue": 5,
+      "metadata": {
+        "description": "Interval in minutes between log pulls"
+      }
+    }
+  },
+  "variables": {
+    "logicAppApiVersion": "2019-05-01"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "[variables('logicAppApiVersion')]",
+      "name": "[parameters('logicAppName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowDefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "arconApiUrl": {
+              "type": "string",
+              "defaultValue": "[parameters('arconApiUrl')]"
+            },
+            "arconApiKey": {
+              "type": "string",
+              "defaultValue": "[parameters('arconApiKey')]"
+            },
+            "workspaceId": {
+              "type": "string",
+              "defaultValue": "[parameters('workspaceId')]"
+            },
+            "workspaceKey": {
+              "type": "string",
+              "defaultValue": "[parameters('workspaceKey')]"
+            },
+            "logTableName": {
+              "type": "string",
+              "defaultValue": "[parameters('logTableName')]"
+            }
+          },
+          "triggers": {
+            "Recurrence": {
+              "recurrence": {
+                "frequency": "Minute",
+                "interval": "[parameters('pullIntervalMinutes')]"
+              },
+              "type": "Recurrence"
+            }
+          },
+          "actions": {
+            "Initialize_LastRunTime": {
+              "runAfter": {},
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "LastRunTime",
+                    "type": "string",
+                    "value": "@{addMinutes(utcNow('u'), -5)}"
+                  }
+                ]
+              }
+            },
+            "Initialize_CurrentPage": {
+              "runAfter": {
+                "Initialize_LastRunTime": [
+                  "Succeeded"
+                ]
+              },
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "CurrentPage",
+                    "type": "integer",
+                    "value": 0
+                  }
+                ]
+              }
+            },
+            "Initialize_HasNextPage": {
+              "runAfter": {
+                "Initialize_CurrentPage": [
+                  "Succeeded"
+                ]
+              },
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "HasNextPage",
+                    "type": "boolean",
+                    "value": true
+                  }
+                ]
+              }
+            },
+            "Initialize_LogArray": {
+              "runAfter": {
+                "Initialize_HasNextPage": [
+                  "Succeeded"
+                ]
+              },
+              "type": "InitializeVariable",
+              "inputs": {
+                "variables": [
+                  {
+                    "name": "LogArray",
+                    "type": "array",
+                    "value": []
+                  }
+                ]
+              }
+            },
+            "Do_Until_NoMorePages": {
+              "runAfter": {
+                "Initialize_LogArray": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Until",
+              "expression": "@equals(variables('HasNextPage'), false)",
+              "limit": {
+                "count": 100,
+                "timeout": "PT1H"
+              },
+              "actions": {
+                "Call_Arcon_API": {
+                  "runAfter": {},
+                  "type": "Http",
+                  "inputs": {
+                    "method": "GET",
+                    "uri": "@{concat(parameters('arconApiUrl'), '/logs?start_time=', variables('LastRunTime'), '&offset=', mul(variables('CurrentPage'), 100), '&limit=100')}",
+                    "headers": {
+                      "X-API-Key": "@parameters('arconApiKey')",
+                      "Content-Type": "application/json"
+                    },
+                    "timeout": "PT5M"
+                  }
+                },
+                "Parse_API_Response": {
+                  "runAfter": {
+                    "Call_Arcon_API": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "ParseJson",
+                  "inputs": {
+                    "content": "@body('Call_Arcon_API')",
+                    "schema": {
+                      "type": "object",
+                      "properties": {
+                        "success": {
+                          "type": "boolean"
+                        },
+                        "data": {
+                          "type": "array"
+                        },
+                        "pagination": {
+                          "type": "object",
+                          "properties": {
+                            "has_next": {
+                              "type": "boolean"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "Append_To_LogArray": {
+                  "runAfter": {
+                    "Parse_API_Response": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "AppendToArrayVariable",
+                  "inputs": {
+                    "name": "LogArray",
+                    "value": "@body('Parse_API_Response').data"
+                  }
+                },
+                "Update_HasNextPage": {
+                  "runAfter": {
+                    "Append_To_LogArray": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "HasNextPage",
+                    "value": "@body('Parse_API_Response').pagination.has_next"
+                  }
+                },
+                "Compose_IncrementedPage": {
+                  "runAfter": {
+                    "Update_HasNextPage": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Compose",
+                  "inputs": "@add(variables('CurrentPage'), 1)"
+                },
+                "Increment_CurrentPage": {
+                  "runAfter": {
+                    "Compose_IncrementedPage": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "CurrentPage",
+                    "value": "@outputs('Compose_IncrementedPage')"
+                  }
+                }
+              }
+            },
+            "For_Each_Log": {
+              "runAfter": {
+                "Do_Until_NoMorePages": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Foreach",
+              "foreach": "@variables('LogArray')",
+              "actions": {
+                "Send_to_Log_Analytics": {
+                  "runAfter": {},
+                  "type": "Http",
+                  "inputs": {
+                    "method": "POST",
+                    "uri": "@{concat('https://', parameters('workspaceId'), '.ods.opinsights.azure.com/api/logs?api-version=2016-04-01')}",
+                    "body": "@string(items('For_Each_Log'))",
+                    "headers": {
+                      "Log-Type": "@parameters('logTableName')",
+                      "x-ms-date": "@utcNow('R')",
+                      "Content-Type": "application/json"
+                    },
+                    "authentication": {
+                      "type": "Basic",
+                      "username": "@parameters('workspaceId')",
+                      "password": "@parameters('workspaceKey')"
+                    },
+                    "timeout": "PT5M"
+                  }
+                }
+              }
+            }
+          },
+          "outputs": {}
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "logicAppResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Logic/workflows', parameters('logicAppName'))]"
+    },
+    "logicAppName": {
+      "type": "string",
+      "value": "[parameters('logicAppName')]"
+    },
+    "deploymentStatus": {
+      "type": "string",
+      "value": "Success - Logic App deployed and enabled"
+    }
+  }
+}
